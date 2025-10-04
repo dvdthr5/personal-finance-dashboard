@@ -1,4 +1,3 @@
-# backend/main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pymongo import MongoClient, ASCENDING
@@ -7,112 +6,109 @@ import os
 import yfinance as yf
 
 load_dotenv()
-print("Loaded DB:", os.getenv("DB_NAME"))
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "finance")
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
-trades_col = db["trades"]
 holdings_col = db["holdings"]
+realized_col = db["realized_gains"]
 
-# Ensure an index on symbol for upsert/queries
 holdings_col.create_index([("symbol", ASCENDING)], unique=True)
-trades_col.create_index([("created_at", ASCENDING)])
 
 app = FastAPI(title="Personal Finance Dashboard API")
-
-class Trade(BaseModel):
-    symbol: str
-    qty: float
-    price: float
-    side: str  # "buy" or "sell"
 
 class Holding(BaseModel):
     symbol: str
     qty: float
     price: float  # average cost basis
 
-@app.get("/")
-def root():
-    return {"message": "Backend is running 🚀"}
+class SellRequest(BaseModel):
+    qty: float
+    price: float | None = None  # optional sell price
 
-@app.post("/trade")
-def add_trade(trade: Trade):
-    doc = trade.dict()
-    doc["symbol"] = doc["symbol"].upper()
-
-    # insert trade record
-    trades_col.insert_one(doc)
-
-    # also reflect into holdings (net quantity)
-    sym = doc["symbol"]
-    delta = doc["qty"] if doc["side"].lower() == "buy" else -doc["qty"]
-
-    # update qty; keep existing average price if present
-    current = holdings_col.find_one({"symbol": sym})
-    if current:
-        new_qty = float(current.get("qty", 0)) + float(delta)
-        # optional: update avg price on buy using weighted average
-        if doc["side"].lower() == "buy" and new_qty > 0:
-            old_qty = float(current.get("qty", 0))
-            old_price = float(current.get("price", 0))
-            new_avg = ((old_qty * old_price) + (doc["qty"] * doc["price"])) / new_qty
-        else:
-            new_avg = float(current.get("price", 0))
-        holdings_col.update_one(
-            {"symbol": sym},
-            {"$set": {"qty": max(new_qty, 0), "price": new_avg}}
-        )
-    else:
-        # first time we see this symbol
-        avg_price = doc["price"]
-        holdings_col.insert_one({"symbol": sym, "qty": max(delta, 0), "price": avg_price})
-
-    return {"status": "success", "trade": doc}
-
-@app.post("/holding")
-def add_holding(holding: Holding):
-    doc = holding.dict()
-    doc["symbol"] = doc["symbol"].upper()
-    # upsert (add if not exists, otherwise set)
-    holdings_col.update_one(
-        {"symbol": doc["symbol"]},
-        {"$set": {"qty": float(doc["qty"]), "price": float(doc["price"])}},
-        upsert=True
-    )
-    return {"status": "success", "holding": doc}
-
-@app.put("/holding/{symbol}")
-def update_holding(symbol: str, holding: Holding):
+@app.delete("/holding/{symbol}")
+def delete_holding(symbol: str):
     sym = symbol.upper()
-    exists = holdings_col.find_one({"symbol": sym})
-    if not exists:
+    result = holdings_col.delete_one({"symbol": sym})
+    if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Holding not found")
-    holdings_col.update_one(
-        {"symbol": sym},
-        {"$set": {"qty": float(holding.qty), "price": float(holding.price)}}
-    )
-    return {"message": f"Holding {sym} updated"}
+    return {"status": "success", "message": f"Holding {sym} deleted"}
+
+@app.post("/holding/{symbol}/sell")
+def sell_holding(symbol: str, request: SellRequest):
+    sym = symbol.upper()
+    h = holdings_col.find_one({"symbol": sym})
+    if not h:
+        raise HTTPException(status_code=404, detail="Holding not found")
+
+    qty_to_sell = float(request.qty)
+    if qty_to_sell <= 0 or qty_to_sell > h["qty"]:
+        raise HTTPException(status_code=400, detail="Invalid sell quantity")
+
+    buy_price = float(h["price"])
+
+    # get sell price (user input or fetch current)
+    if request.price:
+        sell_price = float(request.price)
+    else:
+        ticker = yf.Ticker(sym)
+        hist = ticker.history(period="1d")
+        if hist.empty:
+            raise HTTPException(status_code=400, detail="Could not fetch price")
+        sell_price = float(hist["Close"].iloc[-1])
+
+    profit = (sell_price - buy_price) * qty_to_sell
+
+    # record realized gain
+    realized_col.insert_one({
+        "symbol": sym,
+        "qty": qty_to_sell,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "profit": profit
+    })
+
+    # update holdings
+    new_qty = h["qty"] - qty_to_sell
+    if new_qty <= 0:
+        holdings_col.delete_one({"symbol": sym})
+    else:
+        holdings_col.update_one({"symbol": sym}, {"$set": {"qty": new_qty}})
+
+    return {"status": "success", "realized_profit": profit}
 
 @app.get("/portfolio")
 def get_portfolio():
-    # read holdings from Mongo and fetch prices
     results = []
-    for h in holdings_col.find({}):
+    holdings = list(holdings_col.find({"qty": {"$gt": 0}}))
+
+    symbols = [h["symbol"] for h in holdings]
+    prices = {}
+    if symbols:
+        try:
+            prices = yf.download(symbols, period="1d")["Close"].iloc[-1].to_dict()
+        except Exception:
+            prices = {}
+
+    for h in holdings:
         symbol = h["symbol"]
-        qty = float(h.get("qty", 0))
-        if qty <= 0:
-            continue
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="1d")
-        if hist.empty:
-            continue
-        current_price = float(hist["Close"].iloc[-1])
-        results.append({
-            "symbol": symbol,
-            "qty": qty,
-            "current_price": round(current_price, 2),
-            "value": round(current_price * qty, 2)
-        })
-    return results
+        qty = float(h["qty"])
+        avg_price = float(h["price"])
+        current_price = prices.get(symbol)
+        if current_price:
+            value = round(current_price * qty, 2)
+            profit = round((current_price - avg_price) * qty, 2)
+            results.append({
+                "symbol": symbol,
+                "qty": qty,
+                "avg_price": avg_price,
+                "current_price": round(current_price, 2),
+                "value": value,
+                "unrealized_profit": profit
+            })
+
+    # compute realized profit
+    realized = sum(x["profit"] for x in realized_col.find({}))
+
+    return {"holdings": results, "realized_profit": realized}

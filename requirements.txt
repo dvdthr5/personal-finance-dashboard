@@ -5,3 +5,5 @@ yfinance
 requests
 sqlalchemy
 plotly
+pymongo
+python-dotenv
