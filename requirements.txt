@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-streamlit
-yfinance
-requests
-sqlalchemy
-plotly
-pymongo
-python-dotenv

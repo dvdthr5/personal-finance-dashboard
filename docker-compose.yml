@@ -1,0 +1,32 @@
+services:
+  backend:
+    build: ./backend
+    container_name: finance_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - mongo
+
+  frontend:
+    build: ./frontend
+    container_name: finance_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+
+  mongo:
+    image: mongo:7.0
+    container_name: finance_mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
