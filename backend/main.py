@@ -1,230 +1,301 @@
+# backend/main.py
+from __future__ import annotations
+
+import os
+import time
+import logging
+import asyncio
+from typing import Optional, Dict, Any, List
+
+import requests
+import bcrypt
+import yfinance as yf
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pymongo import MongoClient, ASCENDING
 from bson import ObjectId
-from dotenv import load_dotenv
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
-import os
-import time
-import requests
-from bs4 import BeautifulSoup
-import bcrypt
 
 # ----------------------------
-# Setup
+# Setup / Config
 # ----------------------------
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "finance")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL")
-FMP_API_KEY = os.getenv("FMP_API_KEY")
+FMP_API_KEY = os.getenv("FMP_API_KEY")  # required for FMP
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")  # optional
+FROM_EMAIL = os.getenv("FROM_EMAIL")  # optional
+
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI is not set")
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
-print("✅ Connected to:", client.address, "— databases:", client.list_database_names())
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger("backend")
+
+log.info("✅ Connected to Mongo — databases: %s", client.list_database_names())
+
+# Collections
 users_col = db["users"]
 holdings_col = db["holdings"]
 realized_col = db["realized_gains"]
+prices_col = db["prices"]  # { symbol, price: float, timestamp: epoch_seconds }
 
-# Index for uniqueness per user
+# Indexes
 holdings_col.create_index([("symbol", ASCENDING), ("user_id", ASCENDING)], unique=True)
+prices_col.create_index([("symbol", ASCENDING)], unique=True)
+
 
 # ----------------------------
-# Price Fetching (via FMP API)
-# ----------------------------
-def fetch_live_price(symbol: str) -> float | None:
-    """Fetch live stock price using FMP free-tier endpoints with browser headers."""
-    symbol = symbol.upper()
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json"
-    }
-
-    # Primary free endpoint
-    url_main = f"https://financialmodelingprep.com/api/v3/quote-short/{symbol}?apikey={FMP_API_KEY}"
-    # Fallback endpoint (works for many tickers)
-    url_fallback = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey={FMP_API_KEY}"
-
-    try:
-        res = requests.get(url_main, headers=headers, timeout=10)
-        if res.status_code == 403:
-            print(f"⚠️ 403 on quote-short — retrying with profile endpoint for {symbol}")
-            res = requests.get(url_fallback, headers=headers, timeout=10)
-
-        res.raise_for_status()
-        data = res.json()
-
-        if isinstance(data, list) and len(data) > 0:
-            if "price" in data[0]:
-                price = float(data[0]["price"])
-            elif "price" in data[0].get("price", {}):
-                price = float(data[0]["price"])
-            elif "price" in data[0].get("price", {}):
-                price = float(data[0]["price"])
-            elif "price" in data[0].get("price", {}):
-                price = float(data[0]["price"])
-            elif "price" in data[0].get("price", {}):
-                price = float(data[0]["price"])
-            else:
-                # Some /profile/ results use "price" at top level
-                price = float(data[0].get("price", 0))
-
-            if price > 0:
-                print(f"✅ {symbol} fetched @ ${price:.2f}")
-                return price
-
-        print(f"⚠️ No valid price found for {symbol}")
-        return None
-
-    except requests.exceptions.HTTPError as e:
-        if res.status_code == 403:
-            print(f"🚫 Still forbidden for {symbol}. Likely daily quota reached.")
-        else:
-            print(f"❌ HTTP error for {symbol}: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ Failed to fetch {symbol}: {e}")
-        return None
-
-
-
-
-def update_price_cache(symbol: str, price: float):
-    """Store cached price + timestamp in holdings collection."""
-    holdings_col.update_many(
-        {"symbol": symbol},
-        {"$set": {"latest_price": price, "last_updated": time.time()}}
-    )
-
-
-def get_cached_or_live_price(symbol: str) -> float | None:
-    """Return cached price if under 1 hour old; otherwise refresh."""
-    holding = holdings_col.find_one({"symbol": symbol})
-    if holding and "latest_price" in holding and "last_updated" in holding:
-        age = time.time() - holding["last_updated"]
-        if age < 3600:
-            return float(holding["latest_price"])
-
-    price = fetch_live_price(symbol)
-    if price is not None:
-        update_price_cache(symbol, price)
-    return price
-
-
-def refresh_all_prices():
-    """Refresh all unique ticker prices hourly."""
-    try:
-        symbols = holdings_col.distinct("symbol")
-        if not symbols:
-            print("ℹ️ No holdings to refresh.")
-            return
-
-        print(f"🌐 Refreshing {len(symbols)} stock prices...")
-        for sym in symbols:
-            p = fetch_live_price(sym)
-            if p:
-                update_price_cache(sym, p)
-            time.sleep(1.2)  # avoid API rate limits
-        print("✅ Price refresh complete.")
-    except Exception as e:
-        print(f"❌ Price refresh failed: {e}")
-
-# ----------------------------
-# App Initialization
-# ----------------------------
-app = FastAPI(title="Personal Finance Dashboard API")
-
-@app.on_event("startup")
-def on_startup():
-    """Fetch prices once at startup."""
-    refresh_all_prices()
-
-# CORS for Streamlit
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ----------------------------
-# Utilities
-# ----------------------------
-def send_welcome_email(to_email: str, username: str):
-    if not SENDGRID_API_KEY or not FROM_EMAIL:
-        print("ℹ️ SENDGRID_API_KEY or FROM_EMAIL not set; skipping email.")
-        return
-
-    message = Mail(
-        from_email=FROM_EMAIL,
-        to_emails=to_email,
-        subject="🎉 Welcome to Your Personal Finance Dashboard!",
-        html_content=f"""
-        <html>
-            <body style="font-family: sans-serif;">
-                <h2>Hi {username},</h2>
-                <p>Thanks for creating an account with <b>Personal Finance Dashboard</b>!</p>
-                <p>You can now log in to track your portfolio and manage your investments.</p>
-                <p>Stay smart with your finances,<br>— The Dashboard Team</p>
-            </body>
-        </html>
-        """
-    )
-
-    try:
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        response = sg.send(message)
-        print(f"✅ Email sent to {to_email} (status {response.status_code})")
-    except Exception as e:
-        print(f"❌ Failed to send SendGrid email: {e}")
-
-# ----------------------------
-# Pydantic Models
+# Models
 # ----------------------------
 class Holding(BaseModel):
     symbol: str
     qty: float
     price: float
-    user_id: str
+    user_id: str  # Mongo ObjectId string
+
 
 class SellRequest(BaseModel):
     qty: float
-    price: float | None = None
+    price: Optional[float] = None
     user_id: str
+
 
 class RegisterRequest(BaseModel):
     username: str
     email: str
     password: str
 
+
 class LoginRequest(BaseModel):
-    identifier: str
+    identifier: str  # username OR email
     password: str
 
+
 # ----------------------------
-# Health Endpoint
+# Utilities
+# ----------------------------
+def send_welcome_email(to_email: str, username: str) -> None:
+    if not SENDGRID_API_KEY or not FROM_EMAIL:
+        log.info("ℹ️ SENDGRID_API_KEY or FROM_EMAIL not set; skipping welcome email.")
+        return
+    try:
+        message = Mail(
+            from_email=FROM_EMAIL,
+            to_emails=to_email,
+            subject="🎉 Welcome to Your Personal Finance Dashboard!",
+            html_content=f"""
+                <h2>Hi {username},</h2>
+                <p>Thanks for creating an account with <b>Personal Finance Dashboard</b>!</p>
+                <p>You can now log in to track your portfolio and manage your investments.</p>
+                <p>Stay smart with your finances,<br>— The Dashboard Team</p>
+            """,
+        )
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        resp = sg.send(message)
+        log.info("✅ Welcome email sent to %s (status %s)", to_email, resp.status_code)
+    except Exception as e:
+        log.info("❌ Failed to send SendGrid email: %s", e)
+
+
+def _store_price(symbol: str, price: float) -> None:
+    """Upsert price into Mongo cache with current timestamp."""
+    prices_col.update_one(
+        {"symbol": symbol.upper()},
+        {"$set": {"price": float(price), "timestamp": time.time()}},
+        upsert=True,
+    )
+
+
+def _read_price(symbol: str) -> Optional[Dict[str, Any]]:
+    """Read a cached price doc for symbol."""
+    return prices_col.find_one({"symbol": symbol.upper()})
+
+
+def _fmp_quote(symbol: str) -> Optional[float]:
+    """Try Financial Modeling Prep (FMP) quote-short endpoint (free-tier)."""
+    if not FMP_API_KEY:
+        return None
+    url = f"https://financialmodelingprep.com/api/v3/quote-short/{symbol.upper()}"
+    params = {"apikey": FMP_API_KEY}
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code == 403:
+            log.info("🚫 FMP 403 for %s — endpoint restricted or free-tier limit.", symbol)
+            return None
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list) and data:
+            p = data[0].get("price")
+            if p is not None:
+                return float(p)
+        return None
+    except Exception as e:
+        log.info("❌ FMP error for %s: %s", symbol, e)
+        return None
+
+
+def _yahoo_quote(symbol: str) -> Optional[float]:
+    """Fallback to yfinance with resilient structure handling."""
+    try:
+        t = yf.Ticker(symbol.upper())
+        price = None
+
+        # Try fast_info
+        try:
+            fast = getattr(t, "fast_info", None)
+            if fast:
+                if isinstance(fast, dict):
+                    price = fast.get("last_price")
+                else:
+                    price = getattr(fast, "last_price", None)
+        except Exception:
+            pass
+
+        # Try info field
+        if price is None:
+            info = getattr(t, "info", {})
+            price = info.get("regularMarketPrice")
+
+        # Fallback to last closing price
+        if price is None:
+            hist = t.history(period="1d")
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+
+        # As a last resort, scrape Yahoo Finance
+        if price is None:
+            yurl = f"https://finance.yahoo.com/quote/{symbol.upper()}"
+            html = requests.get(yurl, timeout=8).text
+            import re
+            match = re.search(r'"regularMarketPrice":\{"raw":([\d\.]+),', html)
+            if match:
+                price = float(match.group(1))
+
+        return float(price) if price else None
+
+    except Exception as e:
+        log.info("❌ yfinance error for %s: %s", symbol, e)
+        return None
+
+
+
+def fetch_live_price(symbol: str) -> Optional[float]:
+    """Get a live price from FMP, fallback to Yahoo. Return None if both fail."""
+    # Try FMP first (respects your free key + rate limits)
+    price = _fmp_quote(symbol)
+    if price is not None:
+        return price
+    # Fallback to Yahoo/yfinance
+    return _yahoo_quote(symbol)
+
+
+def get_cached_price(symbol: str, max_age_sec: int = 3600, allow_fetch: bool = True) -> Optional[float]:
+    """
+    Return a cached price if not older than max_age_sec.
+    If stale or missing and allow_fetch=True, fetch & store it.
+    """
+    symbol = symbol.upper()
+    doc = _read_price(symbol)
+    now = time.time()
+    if doc and (now - float(doc.get("timestamp", 0)) < max_age_sec):
+        return float(doc["price"])
+
+    if allow_fetch:
+        price = fetch_live_price(symbol)
+        if price is not None:
+            _store_price(symbol, price)
+            return float(price)
+    return float(doc["price"]) if doc and "price" in doc else None
+
+
+def refresh_all_prices(rate_limit_sec: float = 2.0) -> None:
+    """
+    Rate-limited refresh of *all distinct symbols* from holdings into the prices cache.
+    Designed for startup and hourly background refreshes.
+    """
+    symbols = holdings_col.distinct("symbol")
+    if not symbols:
+        log.info("ℹ️ No holdings found to refresh prices for.")
+        return
+
+    log.info("🌐 Refreshing prices for %d symbols...", len(symbols))
+    for i, sym in enumerate(symbols, start=1):
+        sym = sym.upper()
+        price = fetch_live_price(sym)
+        if price is not None:
+            _store_price(sym, price)
+            log.info("  %2d) ✅ %s @ %.4f", i, sym, price)
+        else:
+            log.info("  %2d) ⚠️ %s — no price fetched", i, sym)
+        # Respect free-tier throttling
+        time.sleep(rate_limit_sec)
+    log.info("✅ Price refresh complete.")
+
+
+# ----------------------------
+# FastAPI
+# ----------------------------
+app = FastAPI(title="Personal Finance Dashboard API")
+
+# CORS so Streamlit can call FastAPI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # tighten if you prefer
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    """Preload prices once and start a periodic hourly refresher."""
+    # Preload once (blocking) so UI has values on first load
+    try:
+        refresh_all_prices(rate_limit_sec=2.0)
+    except Exception as e:
+        log.info("❌ Startup refresh failed: %s", e)
+
+    # Start hourly background refresher
+    async def refresher():
+        while True:
+            try:
+                # run the blocking refresh in a thread so we don't block the event loop
+                await asyncio.to_thread(refresh_all_prices, 2.0)
+            except Exception as e:
+                log.info("❌ Hourly refresh failed: %s", e)
+            await asyncio.sleep(3600)
+
+    asyncio.create_task(refresher())
+
+
+# ----------------------------
+# Health
 # ----------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+
 # ----------------------------
-# Authentication
+# Auth
 # ----------------------------
 @app.post("/register")
 def register_user(req: RegisterRequest, background_tasks: BackgroundTasks):
     if users_col.find_one({"email": req.email}):
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    def create_user():
+    def _create():
         hashed_pw = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt())
         users_col.insert_one({
             "username": req.username,
@@ -234,7 +305,7 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks):
         })
         send_welcome_email(req.email, req.username)
 
-    background_tasks.add_task(create_user)
+    background_tasks.add_task(_create)
     return {"message": "Account creation queued; you’ll get an email shortly."}
 
 
@@ -245,15 +316,15 @@ def login_user(req: LoginRequest):
     })
     if not user or not bcrypt.checkpw(req.password.encode("utf-8"), user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
     return {
         "user_id": str(user["_id"]),
         "username": user["username"],
         "admin": user["admin"]
     }
 
+
 # ----------------------------
-# Holdings Endpoints
+# Holdings
 # ----------------------------
 @app.post("/holding")
 def add_holding(req: Holding, background_tasks: BackgroundTasks):
@@ -261,30 +332,29 @@ def add_holding(req: Holding, background_tasks: BackgroundTasks):
         user_id = ObjectId(req.user_id)
         sym = req.symbol.upper()
 
-        # Fetch and store price immediately
-        price = fetch_live_price(sym)
-        if price:
-            update_price_cache(sym, price)
-            print(f"💰 Cached {sym} @ ${price:.2f} on insert")
+        # Immediately warm the symbol price so the UI can show it after add
+        p = get_cached_price(sym, max_age_sec=3600, allow_fetch=True)
+        if p is not None:
+            log.info("💰 Cached %s @ %.4f on insert", sym, p)
 
         existing = holdings_col.find_one({"symbol": sym, "user_id": user_id})
         if existing:
-            new_qty = existing["qty"] + req.qty
-            new_price = ((existing["price"] * existing["qty"]) + (req.price * req.qty)) / new_qty
+            new_qty = float(existing["qty"]) + float(req.qty)
+            new_price = (
+                (float(existing["price"]) * float(existing["qty"])) + (float(req.price) * float(req.qty))
+            ) / new_qty
             holdings_col.update_one(
                 {"_id": existing["_id"]},
-                {"$set": {"qty": new_qty, "price": new_price}}
+                {"$set": {"qty": new_qty, "price": new_price}},
             )
         else:
             holdings_col.insert_one({
                 "symbol": sym,
-                "qty": req.qty,
-                "price": req.price,
-                "user_id": user_id,
-                "latest_price": price,
-                "last_updated": time.time()
+                "qty": float(req.qty),
+                "price": float(req.price),
+                "user_id": user_id
             })
-        print(f"✅ Holding {sym} saved for {user_id}")
+        log.info("✅ Holding %s saved for %s", sym, user_id)
 
     background_tasks.add_task(insert_or_update)
     return {"status": "success", "message": f"Holding {req.symbol.upper()} queued for saving"}
@@ -297,9 +367,9 @@ def delete_holding(symbol: str, background_tasks: BackgroundTasks, user_id: str 
     def perform_delete():
         result = holdings_col.delete_one({"symbol": sym, "user_id": ObjectId(user_id)})
         if result.deleted_count == 0:
-            print(f"⚠️ Holding {sym} not found for {user_id}")
+            log.info("⚠️ Holding %s not found for %s", sym, user_id)
         else:
-            print(f"✅ Holding {sym} deleted for {user_id}")
+            log.info("✅ Holding %s deleted for %s", sym, user_id)
 
     background_tasks.add_task(perform_delete)
     return {"status": "queued", "message": f"Holding {sym} deletion queued"}
@@ -312,17 +382,20 @@ def sell_holding(symbol: str, request: SellRequest, background_tasks: Background
         sym = symbol.upper()
         h = holdings_col.find_one({"symbol": sym, "user_id": user_id})
         if not h:
-            print(f"❌ Holding {sym} not found for {user_id}")
+            log.info("❌ Holding %s not found for %s", sym, user_id)
             return
         qty_to_sell = float(request.qty)
-        if qty_to_sell <= 0 or qty_to_sell > float(h["qty"]):
-            print("❌ Invalid quantity")
+        current_qty = float(h["qty"])
+        if qty_to_sell <= 0 or qty_to_sell > current_qty:
+            log.info("❌ Invalid quantity")
             return
+
         buy_price = float(h["price"])
-        sell_price = float(request.price) if request.price else get_cached_or_live_price(sym)
-        if not sell_price:
-            print(f"⚠️ Could not fetch current price for {sym}")
-            return
+        if request.price is not None:
+            sell_price = float(request.price)
+        else:
+            # Try cache first; if stale, allow fetch so we don't block on rate limits too often
+            sell_price = get_cached_price(sym, max_age_sec=300, allow_fetch=True) or buy_price
 
         profit = (sell_price - buy_price) * qty_to_sell
         realized_col.insert_one({
@@ -334,63 +407,79 @@ def sell_holding(symbol: str, request: SellRequest, background_tasks: Background
             "user_id": user_id
         })
 
-        new_qty = float(h["qty"]) - qty_to_sell
+        new_qty = current_qty - qty_to_sell
         if new_qty <= 0:
             holdings_col.delete_one({"_id": h["_id"]})
         else:
             holdings_col.update_one({"_id": h["_id"]}, {"$set": {"qty": new_qty}})
-        print(f"✅ Sold {sym} — profit {profit}")
+
+        log.info("✅ Sold %s — profit %.4f", sym, profit)
 
     background_tasks.add_task(process_sale)
     return {"status": "queued", "message": f"Sale of {symbol.upper()} queued for processing."}
+
 
 # ----------------------------
 # Portfolio
 # ----------------------------
 @app.get("/portfolio")
 def get_portfolio(user_id: str = Query(...)):
-    user = users_col.find_one({"_id": ObjectId(user_id)})
+    # Validate user
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    user = users_col.find_one({"_id": oid})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    holdings = list(holdings_col.find({"user_id": ObjectId(user_id), "qty": {"$gt": 0}}))
+    # Read holdings for this user
+    holdings = list(holdings_col.find({"user_id": oid, "qty": {"$gt": 0}}))
 
-    results = []
+    # Gather prices from cache; don't hammer providers in the request path
+    symbols = [h["symbol"] for h in holdings]
+    prices: Dict[str, Optional[float]] = {}
+    for sym in symbols:
+        # use cached if fresh; do not force fetch here (avoid rate-limit bursts)
+        prices[sym] = get_cached_price(sym, max_age_sec=3600, allow_fetch=False)
+
+    results: List[Dict[str, Any]] = []
     for h in holdings:
         symbol = h["symbol"]
         qty = float(h["qty"])
         avg_price = float(h["price"])
-        current_price = get_cached_or_live_price(symbol)
+        current_price = prices.get(symbol)
 
-        entry = {
+        row: Dict[str, Any] = {
             "symbol": symbol,
             "qty": qty,
             "avg_price": avg_price,
         }
-        if current_price:
-            entry.update({
-                "current_price": round(current_price, 2),
-                "value": round(current_price * qty, 2),
-                "unrealized_profit": round((current_price - avg_price) * qty, 2),
+        if current_price is not None:
+            row.update({
+                "current_price": round(float(current_price), 2),
+                "value": round(float(current_price) * qty, 2),
+                "unrealized_profit": round((float(current_price) - avg_price) * qty, 2),
             })
         else:
-            entry.update({
+            row.update({
                 "current_price": None,
                 "value": None,
                 "unrealized_profit": None,
                 "warning": "price_unavailable",
             })
-        results.append(entry)
+        results.append(row)
 
-    realized = sum(float(x.get("profit", 0)) for x in realized_col.find({"user_id": ObjectId(user_id)}))
+    realized = sum(float(x.get("profit", 0) or 0.0) for x in realized_col.find({"user_id": oid}))
     return {"holdings": results, "realized_profit": realized}
 
+
 # ----------------------------
-# Collectr Value Scraper
+# Collectr scraping helper (unchanged)
 # ----------------------------
 @app.get("/collectr_value")
 def get_collectr_value(url: str = Query(..., description="Full Collectr app link")):
-    """Scrapes total collection value from a public Collectr link."""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         resp = requests.get(url, headers=headers, timeout=10)
@@ -413,3 +502,5 @@ def get_collectr_value(url: str = Query(..., description="Full Collectr app link
         return {"total_value": value}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch: {e}")
+
+
