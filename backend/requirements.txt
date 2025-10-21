@@ -1,23 +1,11 @@
-# --- Web Framework ---
 fastapi==0.115.0
-uvicorn==0.32.0
-
-# --- Database ---
-pymongo==4.10.1
-dnspython==2.6.1  # For MongoDB Atlas or SRV URLs
-
-# --- Validation & Serialization ---
-pydantic==2.9.2
-typing-extensions==4.12.2
-
-# --- Utility & Environment ---
+uvicorn==0.31.0
+pydantic==2.9.0
+pymongo==4.8.0
 python-dotenv==1.0.1
-itsdangerous==2.2.0
 requests==2.32.3
 bcrypt==4.2.0
-
-# --- Additional ---
-yfinance==0.2.23
 beautifulsoup4==4.12.3
-sendgrid==6.11.0
-lxml==5.3.0
+yfinance==0.2.48
+pandas==2.2.3
+numpy==2.1.2
