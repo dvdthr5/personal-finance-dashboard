@@ -1,4 +1,3 @@
-# backend/main.py
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -221,9 +220,6 @@ def login_user(req: LoginRequest):
 
     return {"user_id": str(user["_id"]), "username": user["username"], "admin": user["admin"]}
 
-# =========================
-# Holdings
-# =========================
 # =========================
 # Holdings (Add / Update / Delete / Sell)
 # =========================
