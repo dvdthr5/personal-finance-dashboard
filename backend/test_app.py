@@ -14,12 +14,7 @@ def test_root():
 
 def test_add_holding_and_get_holdings():
     """Test adding and retrieving holdings for a user."""
-    holding = {
-        "user_id": "test_user",
-        "symbol": "AAPL",
-        "quantity": 10,
-        "price": 150.0
-    }
+    holding = {"user_id": "test_user", "symbol": "AAPL", "quantity": 10, "price": 150.0}
 
     add_response = client.post("/add_holding", json=holding)
     assert add_response.status_code == 200
@@ -38,7 +33,7 @@ def test_update_holding_quantity():
         "user_id": "test_user",
         "symbol": "AAPL",
         "quantity": 20,
-        "price": 150.0
+        "price": 150.0,
     }
 
     response = client.post("/update_holding", json=update_payload)
@@ -48,7 +43,9 @@ def test_update_holding_quantity():
 
 def test_delete_holding():
     """Test deleting a holding."""
-    response = client.delete("/delete_holding", params={"user_id": "test_user", "symbol": "AAPL"})
+    response = client.delete(
+        "/delete_holding", params={"user_id": "test_user", "symbol": "AAPL"}
+    )
     assert response.status_code == 200
     data = response.json()
     assert "deleted" in data["message"].lower()
@@ -61,7 +58,7 @@ def test_add_sale_and_get_sales():
         "symbol": "TSLA",
         "quantity": 5,
         "price": 250.0,
-        "gain": 100.0
+        "gain": 100.0,
     }
 
     add_sale_response = client.post("/add_sale", json=sale)
@@ -85,11 +82,7 @@ def test_get_realized_gains():
 
 def test_tax_calculator_estimation():
     """Simulate tax calculator usage."""
-    payload = {
-        "user_id": "test_user",
-        "state": "CA",
-        "salary": 75000
-    }
+    payload = {"user_id": "test_user", "state": "CA", "salary": 75000}
 
     response = client.post("/calculate_tax", json=payload)
     assert response.status_code == 200
