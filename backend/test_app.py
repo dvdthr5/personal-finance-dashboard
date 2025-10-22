@@ -5,18 +5,20 @@ from uuid import uuid4
 
 client = TestClient(app)
 
+
 @pytest.fixture(scope="module")
 def user_id():
     uname = f"ci_user_{uuid4().hex[:8]}"
     email = f"{uname}@example.com"
     password = "testpass123"
     # register
-    client.post("/register", json={"username": uname, "email": email, "password": password})
+    client.post(
+        "/register", json={"username": uname, "email": email, "password": password}
+    )
     # login to obtain user_id
     resp = client.post("/login", json={"identifier": uname, "password": password})
     assert resp.status_code == 200, f"login failed: {resp.text}"
     return resp.json()["user_id"]
-
 
 
 def test_root():
@@ -29,7 +31,7 @@ def test_root():
 
 def test_add_holding_and_get_holdings(user_id):
     """Test adding and retrieving holdings for a user."""
-   
+
     holding = {"user_id": user_id, "symbol": "AAPL", "quantity": 10, "price": 150.0}
 
     add_response = client.post("/holding", json=holding)
