@@ -16,7 +16,7 @@ def test_add_holding_and_get_holdings():
     """Test adding and retrieving holdings for a user."""
     holding = {"user_id": "test_user", "symbol": "AAPL", "qty": 10, "price": 150.0}
 
-    add_response = client.post("/holdings", json=holding)
+    add_response = client.post("/holding", json=holding)
     assert add_response.status_code == 200
 
     get_response = client.get("/portfolio", params={"user_id": "test_user"})
@@ -36,7 +36,7 @@ def test_update_holding_quantity():
         "price": 150.0,
     }
 
-    response = client.post("/holdings", json=update_payload)
+    response = client.post("/holding", json=update_payload)
     assert response.status_code == 200
     assert "updated" in response.json()["message"].lower()
 
@@ -44,7 +44,7 @@ def test_update_holding_quantity():
 def test_delete_holding():
     """Test deleting a holding."""
     symbol = "AAPL"
-    response = client.delete(f"/holdings/{symbol}", params={"user_id": "test_user"})
+    response = client.delete(f"/holding/{symbol}", params={"user_id": "test_user"})
     assert response.status_code == 200
     data = response.json()
     assert "deleted" in data["message"].lower()
@@ -60,7 +60,7 @@ def test_add_sale_and_get_sales():
     }
     symbol = "TSLA"
 
-    add_sale_response = client.post(f"/holdings/{symbol}/sell", json=sale)
+    add_sale_response = client.post(f"/holding/{symbol}/sell", json=sale)
     assert add_sale_response.status_code == 200
 
     sales_response = client.get("/sales_history", params={"user_id": "test_user"})
