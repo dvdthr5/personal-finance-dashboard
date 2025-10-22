@@ -41,8 +41,9 @@ def test_add_holding_and_get_holdings(user_id):
     assert get_response.status_code == 200
 
     holdings = get_response.json()
-    assert isinstance(holdings, list)
-    assert any(h["symbol"] == "AAPL" for h in holdings)
+    assert "holdings" in holdings
+    assert isinstance(holdings["holdings"], list)
+    assert any(h["symbol"] == "AAPL" for h in holdings["holdings"])
 
 
 def test_update_holding_quantity(user_id):
