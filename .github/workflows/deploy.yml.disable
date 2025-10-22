@@ -1,0 +1,31 @@
+name: CD - Deploy to Production
+
+on:
+  workflow_run:
+    workflows: ["CI - Build, Lint, and Test"]
+    types:
+      - completed
+
+jobs:
+  deploy:
+    name: Deploy Updated Containers
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: SSH to Server and Redeploy
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+            docker pull ${{ secrets.DOCKER_USERNAME }}/finance_backend:latest
+            docker pull ${{ secrets.DOCKER_USERNAME }}/finance_frontend:latest
+            cd ~/personal-finance-dashboard
+            docker compose down
+            docker compose up -d --remove-orphans
