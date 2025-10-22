@@ -46,6 +46,15 @@ jobs:
           cd backend
           flake8 .
 
+      - name: Wait for MongoDB to be ready
+        run: |
+          echo "Waiting for MongoDB to be ready..."
+          for i in {1..15}; do
+            nc -z mongo 27017 && echo "MongoDB is up!" && break
+            echo "Waiting for MongoDB... ($i/15)"
+            sleep 5
+          done
+
       - name: Run backend tests
         run: |
           cd backend
