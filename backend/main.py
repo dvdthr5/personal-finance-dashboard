@@ -197,6 +197,7 @@ def read_root():
     """Root endpoint to confirm backend is running."""
     return {"message": "Backend is running successfully 🚀"}
 
+
 # =========================
 # Health
 # =========================
