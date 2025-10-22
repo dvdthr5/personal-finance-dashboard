@@ -50,6 +50,7 @@ app.add_middleware(
 # In-memory cache: { "AAPL": {"price": 123.45, "time": 1710000000.0} }
 mem_price_cache: dict[str, dict[str, float]] = {}
 
+
 # =========================
 # Utilities
 # =========================
@@ -59,8 +60,10 @@ def _objid(s: str) -> ObjectId:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid user_id")
 
+
 def _now() -> float:
     return time.time()
+
 
 def _get_mem_price(symbol: str):
     e = mem_price_cache.get(symbol)
@@ -68,8 +71,10 @@ def _get_mem_price(symbol: str):
         return e["price"]
     return None
 
+
 def _set_mem_price(symbol: str, price: float):
     mem_price_cache[symbol] = {"price": price, "time": _now()}
+
 
 def _get_db_price(symbol: str):
     doc = prices_cache_col.find_one({"symbol": symbol})
@@ -80,12 +85,14 @@ def _get_db_price(symbol: str):
         return float(doc["price"])
     return None
 
+
 def _set_db_price(symbol: str, price: float):
     prices_cache_col.update_one(
         {"symbol": symbol},
         {"$set": {"symbol": symbol, "price": float(price), "updated_at": _now()}},
         upsert=True,
     )
+
 
 # =========================
 # Price Fetching
@@ -127,6 +134,7 @@ def fetch_price(symbol: str) -> float | None:
     print(f"🚫 No valid price found for {symbol}")
     return None
 
+
 # =========================
 # Continuous price refresher
 # =========================
@@ -153,6 +161,7 @@ def continuous_price_refresher():
             print(f"❌ Refresher error: {e}")
             time.sleep(60)
 
+
 # =========================
 # Models
 # =========================
@@ -162,19 +171,23 @@ class Holding(BaseModel):
     price: float
     user_id: str
 
+
 class SellRequest(BaseModel):
     qty: float
     price: float | None = None
     user_id: str
+
 
 class RegisterRequest(BaseModel):
     username: str
     email: str
     password: str
 
+
 class LoginRequest(BaseModel):
     identifier: str
     password: str
+
 
 # =========================
 # Health
@@ -187,6 +200,7 @@ def health():
     except Exception:
         ok = False
     return {"status": "ok" if ok else "degraded"}
+
 
 # =========================
 # Auth
@@ -202,27 +216,36 @@ def register_user(req: RegisterRequest):
         raise HTTPException(status_code=400, detail="Username already taken")
 
     hashed_pw = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt())
-    users_col.insert_one({
-        "username": req.username,
-        "email": req.email,
-        "password": hashed_pw,
-        "admin": False
-    })
+    users_col.insert_one(
+        {
+            "username": req.username,
+            "email": req.email,
+            "password": hashed_pw,
+            "admin": False,
+        }
+    )
     return {"message": "Account created"}
+
 
 @app.post("/login")
 def login_user(req: LoginRequest):
-    user = users_col.find_one({
-        "$or": [{"email": req.identifier}, {"username": req.identifier}]
-    })
+    user = users_col.find_one(
+        {"$or": [{"email": req.identifier}, {"username": req.identifier}]}
+    )
     if not user or not bcrypt.checkpw(req.password.encode("utf-8"), user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    return {"user_id": str(user["_id"]), "username": user["username"], "admin": user["admin"]}
+    return {
+        "user_id": str(user["_id"]),
+        "username": user["username"],
+        "admin": user["admin"],
+    }
+
 
 # =========================
 # Holdings (Add / Update / Delete / Sell)
 # =========================
+
 
 @app.post("/holding")
 def add_or_update_holding(req: Holding):
@@ -238,17 +261,19 @@ def add_or_update_holding(req: Holding):
     if existing:
         holdings_col.update_one(
             {"_id": existing["_id"]},
-            {"$set": {"qty": float(req.qty), "price": float(req.price)}}
+            {"$set": {"qty": float(req.qty), "price": float(req.price)}},
         )
         print(f"🟢 Updated holding {sym} for user {user_id}")
         action = "updated"
     else:
-        holdings_col.insert_one({
-            "symbol": sym,
-            "qty": float(req.qty),
-            "price": float(req.price),
-            "user_id": user_id
-        })
+        holdings_col.insert_one(
+            {
+                "symbol": sym,
+                "qty": float(req.qty),
+                "price": float(req.price),
+                "user_id": user_id,
+            }
+        )
         print(f"🟢 Created new holding {sym} for user {user_id}")
         action = "created"
 
@@ -276,8 +301,7 @@ def delete_holding(symbol: str, user_id: str = Query(...)):
     if result.deleted_count == 0:
         print(f"⚠️ No holding found for {sym} with user_id {uid}")
         raise HTTPException(
-            status_code=404,
-            detail=f"Holding {sym} not found for this user"
+            status_code=404, detail=f"Holding {sym} not found for this user"
         )
 
     print(f"✅ Deleted holding {sym} for user {uid}")
@@ -307,15 +331,17 @@ def sell_holding(symbol: str, req: SellRequest):
     )
     profit = (sell_price - buy_price) * qty_to_sell
 
-    realized_col.insert_one({
-        "symbol": sym,
-        "qty": qty_to_sell,
-        "buy_price": buy_price,
-        "sell_price": sell_price,
-        "profit": profit,
-        "user_id": uid,
-        "ts": datetime.utcnow()
-    })
+    realized_col.insert_one(
+        {
+            "symbol": sym,
+            "qty": qty_to_sell,
+            "buy_price": buy_price,
+            "sell_price": sell_price,
+            "profit": profit,
+            "user_id": uid,
+            "ts": datetime.utcnow(),
+        }
+    )
 
     new_qty = float(h["qty"]) - qty_to_sell
     if new_qty <= 0:
@@ -326,6 +352,7 @@ def sell_holding(symbol: str, req: SellRequest):
         print(f"💸 Sold {qty_to_sell} of {sym}, remaining {new_qty} shares.")
 
     return {"status": "ok", "realized_profit": profit}
+
 
 # =========================
 # Portfolio
@@ -338,7 +365,6 @@ def get_portfolio(user_id: str = Query(...)):
         raise HTTPException(status_code=404, detail="User not found")
 
     holdings = list(holdings_col.find({"user_id": uid, "qty": {"$gt": 0}}))
-    symbols = [h["symbol"].upper() for h in holdings]
 
     results = []
     for h in holdings:
@@ -349,22 +375,29 @@ def get_portfolio(user_id: str = Query(...)):
 
         entry = {"symbol": sym, "qty": qty, "avg_price": avg_price}
         if current_price is not None:
-            entry.update({
-                "current_price": round(current_price, 2),
-                "value": round(current_price * qty, 2),
-                "unrealized_profit": round((current_price - avg_price) * qty, 2),
-            })
+            entry.update(
+                {
+                    "current_price": round(current_price, 2),
+                    "value": round(current_price * qty, 2),
+                    "unrealized_profit": round((current_price - avg_price) * qty, 2),
+                }
+            )
         else:
-            entry.update({
-                "current_price": None,
-                "value": None,
-                "unrealized_profit": None,
-                "warning": "price_unavailable",
-            })
+            entry.update(
+                {
+                    "current_price": None,
+                    "value": None,
+                    "unrealized_profit": None,
+                    "warning": "price_unavailable",
+                }
+            )
         results.append(entry)
 
-    realized = sum(float(x.get("profit", 0)) for x in realized_col.find({"user_id": uid}))
+    realized = sum(
+        float(x.get("profit", 0)) for x in realized_col.find({"user_id": uid})
+    )
     return {"holdings": results, "realized_profit": realized}
+
 
 @app.get("/sales_history")
 def get_sales_history(user_id: str = Query(...)):
@@ -373,15 +406,17 @@ def get_sales_history(user_id: str = Query(...)):
     sales = list(realized_col.find({"user_id": uid}).sort("ts", -1))
     results = []
     for s in sales:
-        results.append({
-            "id": str(s["_id"]),
-            "symbol": s.get("symbol"),
-            "qty": float(s.get("qty", 0)),
-            "buy_price": float(s.get("buy_price", 0)),
-            "sell_price": float(s.get("sell_price", 0)),
-            "profit": float(s.get("profit", 0)),
-            "timestamp": s.get("ts")
-        })
+        results.append(
+            {
+                "id": str(s["_id"]),
+                "symbol": s.get("symbol"),
+                "qty": float(s.get("qty", 0)),
+                "buy_price": float(s.get("buy_price", 0)),
+                "sell_price": float(s.get("sell_price", 0)),
+                "profit": float(s.get("profit", 0)),
+                "timestamp": s.get("ts"),
+            }
+        )
     return {"sales": results}
 
 
@@ -393,10 +428,13 @@ def delete_sale_record(sale_id: str, user_id: str = Query(...)):
         sid = ObjectId(sale_id)
         result = realized_col.delete_one({"_id": sid, "user_id": uid})
         if result.deleted_count == 0:
-            raise HTTPException(status_code=404, detail="Sale not found or not authorized to delete.")
+            raise HTTPException(
+                status_code=404, detail="Sale not found or not authorized to delete."
+            )
         return {"status": "ok", "message": "Sale deleted."}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to delete sale: {e}")
+
 
 # =========================
 # Collectr Scraper
@@ -412,13 +450,20 @@ def get_collectr_value(url: str = Query(..., description="Full Collectr app link
         soup = BeautifulSoup(resp.text, "html.parser")
         value_el = soup.find(string=lambda t: t and "$" in t and "Collection" in t)
         if not value_el:
-            value_el = soup.find(lambda tag: tag.name in ["span", "div"] and "$" in tag.text)
+            value_el = soup.find(
+                lambda tag: tag.name in ["span", "div"] and "$" in tag.text
+            )
 
         if not value_el:
-            raise HTTPException(status_code=404, detail="Could not find collection value on page")
+            raise HTTPException(
+                status_code=404, detail="Could not find collection value on page"
+            )
 
         import re
-        match = re.search(r"\$([\d,\.]+)", value_el if isinstance(value_el, str) else value_el.text)
+
+        match = re.search(
+            r"\$([\d,\.]+)", value_el if isinstance(value_el, str) else value_el.text
+        )
         if not match:
             raise HTTPException(status_code=404, detail="Could not parse value")
 
@@ -428,6 +473,7 @@ def get_collectr_value(url: str = Query(..., description="Full Collectr app link
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch: {e}")
+
 
 # =========================
 # Startup
