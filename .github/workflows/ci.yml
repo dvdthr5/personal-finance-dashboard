@@ -23,7 +23,8 @@ jobs:
           --health-retries 5
 
     env:
-      MONGO_URI: ${{ secrets.MONGO_URI }}
+      MONGO_URI: mongodb://mongo:27017
+      PYTHONPATH: ./backend
 
     steps:
       - name: Checkout code
@@ -38,7 +39,7 @@ jobs:
         run: |
           cd backend
           pip install --no-cache-dir -r requirements.txt
-          pip install pytest flake8
+          pip install pytest flake8 httpx
 
       - name: Lint backend with flake8
         run: |
