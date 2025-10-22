@@ -23,7 +23,7 @@ jobs:
           --health-retries 5
 
     env:
-      MONGO_URI: mongodb://mongo:27017
+      MONGO_URI: mongodb://127.0.0.1:27017
       PYTHONPATH: ./backend
 
     steps:
@@ -54,6 +54,10 @@ jobs:
             echo "Waiting for MongoDB... ($i/15)"
             sleep 5
           done
+
+      - name: Check MongoDB health status
+        run: |
+          docker run --network host mongo:7.0 mongosh --host 127.0.0.1 --eval "db.adminCommand('ping')"
 
       - name: Run backend tests
         run: |
